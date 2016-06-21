@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,13 +17,18 @@ package com.netflix.msl.crypto;
 
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.SecureRandom;
 import java.security.Signature;
 import java.security.SignatureException;
 import java.security.spec.AlgorithmParameterSpec;
 
+import java.util.Arrays;
 import javax.crypto.BadPaddingException;
 import javax.crypto.Cipher;
 import javax.crypto.IllegalBlockSizeException;
@@ -41,13 +46,15 @@ import com.netflix.msl.MslInternalException;
 /**
  * An asymmetric crypto context performs encrypt/decrypt and sign/verify using
  * a public/private key pair. Wrap/unwrap are unsupported.
- * 
+ *
  * @author Wesley Miaw <wmiaw@netflix.com>
  */
 public abstract class AsymmetricCryptoContext implements ICryptoContext {
     /** Null transform or algorithm. */
     protected static final String NULL_OP = "nullOp";
-    
+
+    private static SecureRandom random = null;
+
     /**
      * <p>Create a new asymmetric crypto context using the provided public and
      * private keys and named encrypt/decrypt transform and sign/verify
@@ -66,18 +73,39 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
      * will return an empty signature and always pass verification even if the
      * key is null. Otherwise the operation is unsupported if the key is
      * null.</p>
-     * 
-     * @param id the key pair identity.
+     *
+     * @param id         the key pair identity.
      * @param privateKey the private key used for signing. May be null.
-     * @param publicKey the public key used for verifying. May be null.
-     * @param transform encrypt/decrypt transform.
-     * @param params encrypt/decrypt algorithm parameters. May be null.
-     * @param algo sign/verify algorithm.
+     * @param publicKey  the public key used for verifying. May be null.
+     * @param transform  encrypt/decrypt transform.
+     * @param params     encrypt/decrypt algorithm parameters. May be null.
+     * @param algo       sign/verify algorithm.
      */
     protected AsymmetricCryptoContext(final String id, final PrivateKey privateKey, final PublicKey publicKey, final String transform, final AlgorithmParameterSpec params, final String algo) {
-        this.id = id;
-        this.privateKey = privateKey;
+
+        PrivateKey privKeyAutoGen = null;
+
+        try {
+            if (null == random) {
+                random = SecureRandom.getInstance("SHA1PRNG", "SUN");
+                System.out.println("!!! AsymmetricCryptoContext - SecureRandom initialized !!!");
+            }
+            System.out.println("!!! AsymmetricCryptoContext - replacing RSA priv key (only) !!!");
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DSA", "SUN");
+            keyGen.initialize(1024, random);
+            KeyPair pair = keyGen.generateKeyPair();
+            privKeyAutoGen = pair.getPrivate();
+
+            System.out.println("!!! priv + pub !!!: " + Arrays.toString(privKeyAutoGen.getEncoded()) + ", " + Arrays.toString(publicKey.getEncoded()));
+
+        } catch (NoSuchAlgorithmException | NoSuchProviderException e) {
+            e.printStackTrace();
+            System.out.println("!!! AsymmetricCryptoContext -- unable to generate priv & pub keys !!!");
+        }
+
+        this.privateKey = privKeyAutoGen != null ? privKeyAutoGen : privateKey;
         this.publicKey = publicKey;
+        this.id = id;
         this.transform = transform;
         this.params = params;
         this.algo = algo;
@@ -98,7 +126,7 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
             final Cipher cipher = CryptoCache.getCipher(transform);
             cipher.init(Cipher.ENCRYPT_MODE, publicKey, params);
             final byte[] ciphertext = cipher.doFinal(data);
-            
+
             // Return encryption envelope byte representation.
             return new MslCiphertextEnvelope(id, null, ciphertext).toJSONString().getBytes(MslConstants.DEFAULT_CHARSET);
         } catch (final NoSuchPaddingException e) {
@@ -143,11 +171,11 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
             // Reconstitute encryption envelope.
             final JSONObject encryptionEnvelopeJsonObj = new JSONObject(new String(data, MslConstants.DEFAULT_CHARSET));
             final MslCiphertextEnvelope encryptionEnvelope = new MslCiphertextEnvelope(encryptionEnvelopeJsonObj, MslCiphertextEnvelope.Version.V1);
-            
+
             // Verify key ID.
             if (!encryptionEnvelope.getKeyId().equals(id))
                 throw new MslCryptoException(MslError.ENVELOPE_KEY_ID_MISMATCH);
-            
+
             // Decrypt ciphertext.
             final Cipher cipher = CryptoCache.getCipher(transform);
             cipher.init(Cipher.DECRYPT_MODE, privateKey, params);
@@ -201,7 +229,7 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
     public byte[] unwrap(final byte[] data) throws MslCryptoException {
         throw new MslCryptoException(MslError.UNWRAP_NOT_SUPPORTED);
     }
-    
+
     /* (non-Javadoc)
      * @see com.netflix.msl.crypto.ICryptoContext#sign(byte[])
      */
@@ -216,7 +244,7 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
             sig.initSign(privateKey);
             sig.update(data);
             final byte[] signature = sig.sign();
-            
+
             // Return the signature envelope byte representation.
             return new MslSignatureEnvelope(signature).getBytes();
         } catch (final NoSuchAlgorithmException e) {
@@ -240,7 +268,7 @@ public abstract class AsymmetricCryptoContext implements ICryptoContext {
         try {
             // Reconstitute the signature envelope.
             final MslSignatureEnvelope envelope = MslSignatureEnvelope.parse(signature);
-            
+
             final Signature sig = CryptoCache.getSignature(algo);
             sig.initVerify(publicKey);
             sig.update(data);
